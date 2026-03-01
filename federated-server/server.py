@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import torch
 import torch.nn as nn
 import base64
@@ -8,15 +9,26 @@ import copy
 app = FastAPI()
 
 # =========================
+# CORS (Allow Frontend Access)
+# =========================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # allow all origins (for development)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =========================
 # Global Variables
 # =========================
-global_model = None
 client_updates = []
-total_updates = 0   # 👈 NEW (for frontend)
+total_updates = 0
+round_number = 0
 
 
 # =========================
-# Define Model
+# Model Definition
 # =========================
 class SimpleCNN(nn.Module):
     def __init__(self):
@@ -37,7 +49,7 @@ class SimpleCNN(nn.Module):
         return x
 
 
-# Initialize global model
+# Initialize Global Model
 global_model = SimpleCNN()
 
 
@@ -50,13 +62,14 @@ def home():
 
 
 # =========================
-# NEW STATUS ROUTE (For Frontend)
+# Status Route (Frontend Uses This)
 # =========================
 @app.get("/status")
 def status():
     return {
         "message": "Federated Server Running",
-        "total_updates": total_updates
+        "total_updates": total_updates,
+        "round_number": round_number
     }
 
 
@@ -77,8 +90,9 @@ def get_model():
 @app.post("/send_update")
 def receive_update(data: dict):
     global client_updates
-    global global_model
     global total_updates
+    global global_model
+    global round_number
 
     encoded_weights = data["weights"]
     decoded = base64.b64decode(encoded_weights)
@@ -86,16 +100,17 @@ def receive_update(data: dict):
     state_dict = torch.load(buffer)
 
     client_updates.append(state_dict)
-    total_updates += 1   # 👈 increment for frontend
+    total_updates += 1
 
-    print(f"Received update. Total received: {len(client_updates)}")
+    print(f"Received update. Total received in round: {len(client_updates)}")
 
-    # Aggregate after 3 clients
+    # Aggregate after 3 client updates
     if len(client_updates) >= 3:
         print("Aggregating models...")
         global_model = average_weights(client_updates)
         client_updates = []
-        print("Aggregation complete.")
+        round_number += 1
+        print(f"Aggregation complete. Round {round_number} finished.")
 
     return {"status": "update received"}
 
