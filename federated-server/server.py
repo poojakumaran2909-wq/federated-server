@@ -1,14 +1,23 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
 import torch
 import torch.nn as nn
-import copy
 import base64
 import io
+import copy
 
 app = FastAPI()
 
-# Simple CNN model (same as client)
+# =========================
+# Global Variables
+# =========================
+global_model = None
+client_updates = []
+total_updates = 0   # 👈 NEW (for frontend)
+
+
+# =========================
+# Define Model
+# =========================
 class SimpleCNN(nn.Module):
     def __init__(self):
         super(SimpleCNN, self).__init__()
@@ -20,25 +29,40 @@ class SimpleCNN(nn.Module):
         self.fc2 = nn.Linear(128, 10)
 
     def forward(self, x):
-        return x  # not used on server
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x)))
+        x = x.view(-1, 32 * 6 * 6)
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
 
-# Global model stored on server
+
+# Initialize global model
 global_model = SimpleCNN()
 
-# Store client updates temporarily
-client_updates = []
 
-# Data format for receiving model
-class ModelUpdate(BaseModel):
-    weights: str  # base64 encoded model weights
-
-
+# =========================
+# Root Route
+# =========================
 @app.get("/")
 def home():
     return {"message": "Federated Server Running"}
 
 
-# Client downloads global model
+# =========================
+# NEW STATUS ROUTE (For Frontend)
+# =========================
+@app.get("/status")
+def status():
+    return {
+        "message": "Federated Server Running",
+        "total_updates": total_updates
+    }
+
+
+# =========================
+# Send Global Model To Client
+# =========================
 @app.get("/get_model")
 def get_model():
     buffer = io.BytesIO()
@@ -47,39 +71,44 @@ def get_model():
     return {"weights": encoded}
 
 
-# Client sends update
+# =========================
+# Receive Client Update
+# =========================
 @app.post("/send_update")
-def receive_update(update: ModelUpdate):
+def receive_update(data: dict):
     global client_updates
+    global global_model
+    global total_updates
 
-    decoded = base64.b64decode(update.weights)
+    encoded_weights = data["weights"]
+    decoded = base64.b64decode(encoded_weights)
     buffer = io.BytesIO(decoded)
     state_dict = torch.load(buffer)
 
     client_updates.append(state_dict)
+    total_updates += 1   # 👈 increment for frontend
 
     print(f"Received update. Total received: {len(client_updates)}")
 
-    # If 3 clients sent updates → aggregate
+    # Aggregate after 3 clients
     if len(client_updates) >= 3:
-        aggregate_models()
+        print("Aggregating models...")
+        global_model = average_weights(client_updates)
+        client_updates = []
+        print("Aggregation complete.")
 
     return {"status": "update received"}
 
 
-def aggregate_models():
-    global global_model, client_updates
+# =========================
+# Federated Averaging
+# =========================
+def average_weights(models):
+    avg_model = copy.deepcopy(global_model)
 
-    print("Aggregating models...")
+    for key in avg_model.state_dict().keys():
+        avg_model.state_dict()[key].data.copy_(
+            sum(model[key] for model in models) / len(models)
+        )
 
-    new_state = copy.deepcopy(client_updates[0])
-
-    for key in new_state.keys():
-        new_state[key] = sum(
-            [client[key] for client in client_updates]
-        ) / len(client_updates)
-
-    global_model.load_state_dict(new_state)
-    client_updates = []
-
-    print("Aggregation complete.")
+    return avg_model
