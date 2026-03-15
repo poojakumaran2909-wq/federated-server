@@ -1,9 +1,22 @@
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uuid
 from datetime import datetime
 
 app = FastAPI()
+
+# -----------------------------
+# Enable CORS (for React dashboard)
+# -----------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # allow React frontend
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -----------------------------
 # In‑memory storage
@@ -78,19 +91,16 @@ def register_client():
 @app.post("/send_update")
 def receive_update(update: ModelUpdate):
 
-    # Verify client
     if update.client_id not in registered_clients:
         return {"error": "client not registered"}
 
     if registered_clients[update.client_id]["api_key"] != update.api_key:
         return {"error": "invalid api key"}
 
-    # Store update
     model_updates.append(update.weights)
 
     training_metrics["total_updates"] += 1
 
-    # Aggregation trigger
     if len(model_updates) >= 3:
         aggregate_models()
 
@@ -111,7 +121,6 @@ def aggregate_models():
     global model_version
     global round_number
 
-    # Simple averaging placeholder
     global_model = {
         "aggregated_weights": "placeholder"
     }
