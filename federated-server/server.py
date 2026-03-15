@@ -5,7 +5,9 @@ import torch.nn as nn
 import base64
 import io
 import copy
+import uuid
 
+registered_clients = {}
 app = FastAPI()
 
 # =========================
@@ -89,32 +91,32 @@ def get_model():
 # =========================
 @app.post("/send_update")
 def receive_update(data: dict):
-    global client_updates
-    global total_updates
-    global global_model
-    global round_number
 
-    encoded_weights = data["weights"]
-    decoded = base64.b64decode(encoded_weights)
-    buffer = io.BytesIO(decoded)
-    state_dict = torch.load(buffer)
+    client_id = data.get("client_id")
+    api_key = data.get("api_key")
 
-    client_updates.append(state_dict)
-    total_updates += 1
+    if client_id not in registered_clients:
+        return {"error": "client not registered"}
 
-    print(f"Received update. Total received in round: {len(client_updates)}")
+    if registered_clients[client_id]["api_key"] != api_key:
+        return {"error": "invalid api key"}
 
-    # Aggregate after 3 client updates
-    if len(client_updates) >= 3:
-        print("Aggregating models...")
-        global_model = average_weights(client_updates)
-        client_updates = []
-        round_number += 1
-        print(f"Aggregation complete. Round {round_number} finished.")
+    # continue with update logic
 
-    return {"status": "update received"}
+@app.post("/register_client")
+def register_client():
+    client_id = str(uuid.uuid4())
+    api_key = str(uuid.uuid4())
 
+    registered_clients[client_id] = {
+        "api_key": api_key
+    }
 
+    return {
+        "client_id": client_id,
+        "api_key": api_key
+    }
+    
 # =========================
 # Federated Averaging
 # =========================
