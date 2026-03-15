@@ -1,131 +1,158 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import torch
-import torch.nn as nn
-import base64
-import io
-import copy
+from pydantic import BaseModel
 import uuid
+from datetime import datetime
 
-registered_clients = {}
 app = FastAPI()
 
-# =========================
-# CORS (Allow Frontend Access)
-# =========================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # allow all origins (for development)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# -----------------------------
+# In‑memory storage
+# -----------------------------
 
-# =========================
-# Global Variables
-# =========================
-client_updates = []
-total_updates = 0
+registered_clients = {}
+model_updates = []
+
+global_model = None
+model_version = 0
 round_number = 0
 
+training_metrics = {
+    "total_updates": 0,
+    "round": 0,
+    "registered_clients": 0,
+    "model_version": 0
+}
 
-# =========================
-# Model Definition
-# =========================
-class SimpleCNN(nn.Module):
-    def __init__(self):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 16, 3)
-        self.conv2 = nn.Conv2d(16, 32, 3)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.relu = nn.ReLU()
-        self.fc1 = nn.Linear(32 * 6 * 6, 128)
-        self.fc2 = nn.Linear(128, 10)
+# -----------------------------
+# Data model for client update
+# -----------------------------
 
-    def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = x.view(-1, 32 * 6 * 6)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+class ModelUpdate(BaseModel):
+    client_id: str
+    api_key: str
+    weights: dict
 
 
-# Initialize Global Model
-global_model = SimpleCNN()
+# -----------------------------
+# Server status endpoint
+# -----------------------------
 
-
-# =========================
-# Root Route
-# =========================
-@app.get("/")
-def home():
-    return {"message": "Federated Server Running"}
-
-
-# =========================
-# Status Route (Frontend Uses This)
-# =========================
 @app.get("/status")
 def status():
     return {
         "message": "Federated Server Running",
-        "total_updates": total_updates,
-        "round_number": round_number
+        "round": round_number,
+        "total_updates": training_metrics["total_updates"],
+        "registered_clients": len(registered_clients),
+        "model_version": model_version
     }
 
 
-# =========================
-# Send Global Model To Client
-# =========================
-@app.get("/get_model")
-def get_model():
-    buffer = io.BytesIO()
-    torch.save(global_model.state_dict(), buffer)
-    encoded = base64.b64encode(buffer.getvalue()).decode()
-    return {"weights": encoded}
-
-
-# =========================
-# Receive Client Update
-# =========================
-@app.post("/send_update")
-def receive_update(data: dict):
-
-    client_id = data.get("client_id")
-    api_key = data.get("api_key")
-
-    if client_id not in registered_clients:
-        return {"error": "client not registered"}
-
-    if registered_clients[client_id]["api_key"] != api_key:
-        return {"error": "invalid api key"}
-
-    # continue with update logic
+# -----------------------------
+# Client registration
+# -----------------------------
 
 @app.post("/register_client")
 def register_client():
+
     client_id = str(uuid.uuid4())
     api_key = str(uuid.uuid4())
 
     registered_clients[client_id] = {
-        "api_key": api_key
+        "api_key": api_key,
+        "registered_at": str(datetime.now())
     }
+
+    training_metrics["registered_clients"] = len(registered_clients)
 
     return {
         "client_id": client_id,
         "api_key": api_key
     }
-    
-# =========================
-# Federated Averaging
-# =========================
-def average_weights(models):
-    avg_model = copy.deepcopy(global_model)
 
-    for key in avg_model.state_dict().keys():
-        avg_model.state_dict()[key].data.copy_(
-            sum(model[key] for model in models) / len(models)
-        )
 
-    return avg_model
+# -----------------------------
+# Receive model update
+# -----------------------------
+
+@app.post("/send_update")
+def receive_update(update: ModelUpdate):
+
+    # Verify client
+    if update.client_id not in registered_clients:
+        return {"error": "client not registered"}
+
+    if registered_clients[update.client_id]["api_key"] != update.api_key:
+        return {"error": "invalid api key"}
+
+    # Store update
+    model_updates.append(update.weights)
+
+    training_metrics["total_updates"] += 1
+
+    # Aggregation trigger
+    if len(model_updates) >= 3:
+        aggregate_models()
+
+    return {
+        "message": "update received",
+        "total_updates": training_metrics["total_updates"]
+    }
+
+
+# -----------------------------
+# Model aggregation
+# -----------------------------
+
+def aggregate_models():
+
+    global global_model
+    global model_updates
+    global model_version
+    global round_number
+
+    # Simple averaging placeholder
+    global_model = {
+        "aggregated_weights": "placeholder"
+    }
+
+    model_version += 1
+    round_number += 1
+
+    training_metrics["round"] = round_number
+    training_metrics["model_version"] = model_version
+
+    model_updates = []
+
+    print(f"Model aggregated → version {model_version}")
+
+
+# -----------------------------
+# Get latest global model
+# -----------------------------
+
+@app.get("/get_global_model")
+def get_global_model():
+
+    if global_model is None:
+        return {"message": "No model available yet"}
+
+    return {
+        "model_version": model_version,
+        "model": global_model
+    }
+
+
+# -----------------------------
+# Training metrics endpoint
+# -----------------------------
+
+@app.get("/metrics")
+def get_metrics():
+
+    return {
+        "round": round_number,
+        "total_updates": training_metrics["total_updates"],
+        "registered_clients": len(registered_clients),
+        "model_version": model_version
+    }
