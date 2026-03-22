@@ -1,69 +1,54 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 import uuid
+import torch
+import json
 from datetime import datetime
+import os
+from database import SessionLocal, engine
+from models import Base, Client, Update, ModelVersion
+
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# -----------------------------
-# In‑memory storage
-# -----------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-registered_clients = {}
-model_updates = []
+MODEL_PATH = "models/global_model.pt"
 
-global_model = None
-model_version = 0
-round_number = 0
+if os.path.exists(MODEL_PATH):
+    model = torch.load(MODEL_PATH)
+else:
+    from ultralytics import YOLO
+    model = YOLO("yolov8n.pt")
+    torch.save(model, MODEL_PATH)
 
-training_metrics = {
-    "total_updates": 0,
-    "round": 0,
-    "registered_clients": 0,
-    "model_version": 0
-}
-
-# -----------------------------
-# Data model for client update
-# -----------------------------
-
-class ModelUpdate(BaseModel):
-    client_id: str
-    api_key: str
-    weights: dict
-
-
-# -----------------------------
-# Server status endpoint
-# -----------------------------
-
-@app.get("/status")
-def status():
-    return {
-        "message": "Federated Server Running",
-        "round": round_number,
-        "total_updates": training_metrics["total_updates"],
-        "registered_clients": len(registered_clients),
-        "model_version": model_version
-    }
-
-
-# -----------------------------
-# Client registration
-# -----------------------------
+# -------------------------
+# Register Client
+# -------------------------
 
 @app.post("/register_client")
-def register_client():
+def register():
+
+    db = SessionLocal()
 
     client_id = str(uuid.uuid4())
     api_key = str(uuid.uuid4())
 
-    registered_clients[client_id] = {
-        "api_key": api_key,
-        "registered_at": str(datetime.now())
-    }
+    client = Client(
+        client_id=client_id,
+        api_key=api_key
+    )
 
-    training_metrics["registered_clients"] = len(registered_clients)
+    db.add(client)
+    db.commit()
 
     return {
         "client_id": client_id,
@@ -71,88 +56,102 @@ def register_client():
     }
 
 
-# -----------------------------
-# Receive model update
-# -----------------------------
+# -------------------------
+# Get Global Model
+# -------------------------
+
+@app.get("/get_model")
+def get_model():
+
+    weights = model.state_dict()
+
+    return {
+        "weights": {k: v.tolist() for k, v in weights.items()}
+    }
+
+
+# -------------------------
+# Receive Client Update
+# -------------------------
 
 @app.post("/send_update")
-def receive_update(update: ModelUpdate):
+def receive(update: dict):
 
-    # Verify client
-    if update.client_id not in registered_clients:
-        return {"error": "client not registered"}
+    db = SessionLocal()
 
-    if registered_clients[update.client_id]["api_key"] != update.api_key:
-        return {"error": "invalid api key"}
+    weights = update["weights"]
+    client_id = update["client_id"]
 
-    # Store update
-    model_updates.append(update.weights)
+    upd = Update(
+        client_id=client_id,
+        weights=json.dumps(weights)
+    )
 
-    training_metrics["total_updates"] += 1
+    db.add(upd)
+    db.commit()
 
-    # Aggregation trigger
-    if len(model_updates) >= 3:
-        aggregate_models()
+    updates = db.query(Update).all()
 
-    return {
-        "message": "update received",
-        "total_updates": training_metrics["total_updates"]
-    }
+    if len(updates) >= 3:
+        aggregate(db, updates)
 
-
-# -----------------------------
-# Model aggregation
-# -----------------------------
-
-def aggregate_models():
-
-    global global_model
-    global model_updates
-    global model_version
-    global round_number
-
-    # Simple averaging placeholder
-    global_model = {
-        "aggregated_weights": "placeholder"
-    }
-
-    model_version += 1
-    round_number += 1
-
-    training_metrics["round"] = round_number
-    training_metrics["model_version"] = model_version
-
-    model_updates = []
-
-    print(f"Model aggregated → version {model_version}")
+    return {"message": "update stored"}
 
 
-# -----------------------------
-# Get latest global model
-# -----------------------------
+# -------------------------
+# Federated Averaging
+# -------------------------
 
-@app.get("/get_global_model")
-def get_global_model():
+def aggregate(db, updates):
 
-    if global_model is None:
-        return {"message": "No model available yet"}
+    global model
 
-    return {
-        "model_version": model_version,
-        "model": global_model
-    }
+    weight_list = []
+
+    for u in updates:
+        weight_list.append(json.loads(u.weights))
+
+    avg = {}
+
+    for key in weight_list[0]:
+
+        avg[key] = sum(
+            torch.tensor(w[key]) for w in weight_list
+        ) / len(weight_list)
+
+    model.load_state_dict(avg)
+
+    torch.save(model, MODEL_PATH)
+
+    version = db.query(ModelVersion).count() + 1
+
+    model_record = ModelVersion(
+        version=version,
+        path=MODEL_PATH
+    )
+
+    db.add(model_record)
+
+    db.query(Update).delete()
+
+    db.commit()
+
+    print("Model aggregated. Version:", version)
 
 
-# -----------------------------
-# Training metrics endpoint
-# -----------------------------
-
-@app.get("/metrics")
-def get_metrics():
-
-    return {
-        "round": round_number,
-        "total_updates": training_metrics["total_updates"],
-        "registered_clients": len(registered_clients),
-        "model_version": model_version
-    }
+# -------------------------
+# Server Status
+# -------------------------
+@app.get("/status")
+def status():
+    db = SessionLocal()
+    try:
+        return {
+            "clients": db.query(Client).count(),
+            "updates": db.query(Update).count(),
+            "models": db.query(ModelVersion).count()
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        db.close()
